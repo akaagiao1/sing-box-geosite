@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "rules": [
     {
       "domain": [
@@ -16,7 +17,11 @@
         "blobstore.apple.com",
         "music.apple.com"
       ]
+    },
+    {
+      "process_name": [
+        "Music"
+      ]
     }
-  ],
-  "version": 2
+  ]
 }

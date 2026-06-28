@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "rules": [
     {
       "domain": [
@@ -51,6 +52,11 @@
         "microsoft",
         "onedrive",
         "skydrive"
+      ]
+    },
+    {
+      "domain_regex": [
+        "^onedrive\\..*$"
       ]
     },
     {
@@ -720,6 +726,5 @@
         "yammerusercontent.com"
       ]
     }
-  ],
-  "version": 2
+  ]
 }

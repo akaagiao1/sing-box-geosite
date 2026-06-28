@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "rules": [
     {
       "domain": [
@@ -43,6 +44,5 @@
         "ttwebview.com"
       ]
     }
-  ],
-  "version": 2
+  ]
 }

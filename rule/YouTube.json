@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "rules": [
     {
       "domain": [
@@ -10,6 +11,13 @@
     {
       "domain_keyword": [
         "youtube"
+      ]
+    },
+    {
+      "domain_regex": [
+        "^youtube\\..*$",
+        "^youtube\\..*\\..*$",
+        "^youtube\\.com\\..*$"
       ]
     },
     {
@@ -202,6 +210,5 @@
         "2620:120:e000::/40"
       ]
     }
-  ],
-  "version": 2
+  ]
 }
