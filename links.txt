@@ -1,5 +1,6 @@
 https://raw.githubusercontent.com/NobyDa/Script/master/QuantumultX/Bilibili.list
 https://raw.githubusercontent.com/NobyDa/Script/master/Surge/WeChat.list
+https://github.com/blackmatrix7/ios_rule_script/raw/refs/heads/master/rule/Surge/Apple/Apple_All.list
 https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/QuantumultX/Microsoft/Microsoft.list
 https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/QuantumultX/Facebook/Facebook.list
 https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/QuantumultX/Telegram/Telegram.list
