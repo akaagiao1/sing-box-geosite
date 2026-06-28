@@ -1,65 +1,73 @@
-name: Config Update
+name: Update rule sets
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
+  pull_request:
   workflow_dispatch:
   schedule:
-    - cron: '0 12 * * *'
+    - cron: "0 12 * * *"
+
+concurrency:
+  group: rule-update-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v2
-    - name: "Setup sing-box"
-      env:
-        SING_BOX_DEB_URL: "https://github.com/SagerNet/sing-box/releases/download/v1.10.0-alpha.27/sing-box_1.10.0-alpha.27_linux_amd64.deb"
-      run: |
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -v
+
+  update:
+    if: github.event_name != 'pull_request'
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      SING_BOX_VERSION: "1.13.12"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Install sing-box
+        run: |
           set -Eeuo pipefail
-          wget -O sing-box.deb $SING_BOX_DEB_URL
-          sudo dpkg -i sing-box.deb
-    - name: Set up Python3
-      uses: actions/setup-python@v2
-      with:
-        python-version: 3.x
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install pandas requests pyyaml
-    - name: Download content
-      run: |
-        URL="https://raw.githubusercontent.com/AdguardTeam/AdguardFilters/master/BaseFilter/sections/adservers.txt"
-        OUTPUT_FILE="./rule/adservers.txt"
-
-        curl -L $URL -o $OUTPUT_FILE
-
-        if [ -f "$OUTPUT_FILE" ]; then
-          echo "Download successful: $OUTPUT_FILE"
-        else
-          echo "Download failed."
-          exit 1
-        fi
-    - name: Convert AdGuard DNS Filter to sing-box rule set
-      run: |
-        sing-box rule-set convert --type adguard --output ./rule/adservers.srs ./rule/adservers.txt
-    - name: Run script
-      run: python ../main.py
-      working-directory: ./rule/
-    - name: Commit and push config.json
-      run: |
-        git config --global user.email "action@github.com"
-        git config --global user.name "GitHub Action"
-        git add ./rule/*.json
-        git add ./rule/*.srs
-        git add ./rule/*.txt
-
-        # 检查是否有文件被修改
-        if git diff --staged --quiet; then
-          echo "No changes to commit"
-          exit 0
-        else
-          git commit -m "Update rules"
-          git push
-        fi
+          archive="sing-box-${SING_BOX_VERSION}-linux-amd64.tar.gz"
+          curl --fail --location --retry 3 --output "$archive" \
+            "https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/${archive}"
+          tar -xzf "$archive"
+          echo "$PWD/sing-box-${SING_BOX_VERSION}-linux-amd64" >> "$GITHUB_PATH"
+      - name: Update AdGuard rule set
+        run: |
+          curl --fail --location --retry 3 \
+            --output rule/adservers.txt \
+            "https://raw.githubusercontent.com/AdguardTeam/AdguardFilters/master/BaseFilter/sections/adservers.txt"
+          sing-box rule-set convert --type adguard \
+            --output rule/adservers.srs rule/adservers.txt
+      - name: Generate rule sets
+        run: python main.py
+      - name: Commit changes
+        run: |
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add rule
+          if git diff --staged --quiet; then
+            echo "No rule changes"
+          else
+            git commit -m "chore(rules): update generated rule sets"
+            git push
+          fi

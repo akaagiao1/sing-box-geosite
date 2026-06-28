@@ -1,187 +1,274 @@
-import pandas as pd
-import re
-import concurrent.futures
-import os
+#!/usr/bin/env python3
+"""Convert common proxy rule lists to sing-box rule-set files."""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
 import json
+import re
+import subprocess
+import sys
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Iterable
+from urllib.parse import urlparse
+
 import requests
 import yaml
-import ipaddress
-from io import StringIO
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
-# 映射字典
-MAP_DICT = {'DOMAIN-SUFFIX': 'domain_suffix', 'HOST-SUFFIX': 'domain_suffix', 'host-suffix': 'domain_suffix', 'DOMAIN': 'domain', 'HOST': 'domain', 'host': 'domain',
-            'DOMAIN-KEYWORD':'domain_keyword', 'HOST-KEYWORD': 'domain_keyword', 'host-keyword': 'domain_keyword', 'IP-CIDR': 'ip_cidr',
-            'ip-cidr': 'ip_cidr', 'IP-CIDR6': 'ip_cidr', 
-            'IP6-CIDR': 'ip_cidr','SRC-IP-CIDR': 'source_ip_cidr', 'GEOIP': 'geoip', 'DST-PORT': 'port',
-            'SRC-PORT': 'source_port', "URL-REGEX": "domain_regex", "DOMAIN-REGEX": "domain_regex"}
 
-def read_yaml_from_url(url):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    response = requests.get(url, headers=headers)
-    response.raise_for_status()
-    yaml_data = yaml.safe_load(response.text)
-    return yaml_data
+ROOT = Path(__file__).resolve().parent
+DEFAULT_LINKS_FILE = ROOT / "links.txt"
+DEFAULT_OUTPUT_DIR = ROOT / "rule"
+USER_AGENT = "sing-box-geosite/1.0"
+DOMAIN_RULE_TYPES = frozenset({"domain", "domain_suffix", "domain_keyword", "domain_regex"})
+IP_RULE_TYPES = frozenset({"ip_cidr", "source_ip_cidr"})
 
-def read_list_from_url(url):
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        csv_data = StringIO(response.text)
-        df = pd.read_csv(csv_data, header=None, names=['pattern', 'address', 'other', 'other2', 'other3'], on_bad_lines='skip')
-    else:
-        return None
-    filtered_rows = []
-    rules = []
-    # 处理逻辑规则
-    if 'AND' in df['pattern'].values:
-        and_rows = df[df['pattern'].str.contains('AND', na=False)]
-        for _, row in and_rows.iterrows():
-            rule = {
-                "type": "logical",
-                "mode": "and",
-                "rules": []
-            }
-            pattern = ",".join(row.values.astype(str))
-            components = re.findall(r'\((.*?)\)', pattern)
-            for component in components:
-                for keyword in MAP_DICT.keys():
-                    if keyword in component:
-                        match = re.search(f'{keyword},(.*)', component)
-                        if match:
-                            value = match.group(1)
-                            rule["rules"].append({
-                                MAP_DICT[keyword]: value
-                            })
-            rules.append(rule)
-    for index, row in df.iterrows():
-        if 'AND' not in row['pattern']:
-            filtered_rows.append(row)
-    df_filtered = pd.DataFrame(filtered_rows, columns=['pattern', 'address', 'other', 'other2', 'other3'])
-    return df_filtered, rules
+RULE_TYPE_MAP = {
+    "DOMAIN-SUFFIX": "domain_suffix",
+    "HOST-SUFFIX": "domain_suffix",
+    "DOMAIN": "domain",
+    "HOST": "domain",
+    "DOMAIN-KEYWORD": "domain_keyword",
+    "HOST-KEYWORD": "domain_keyword",
+    "PROCESS-NAME": "process_name",
+    "IP-CIDR": "ip_cidr",
+    "IP-CIDR6": "ip_cidr",
+    "IP6-CIDR": "ip_cidr",
+    "SRC-IP-CIDR": "source_ip_cidr",
+    "GEOIP": "geoip",
+    "DST-PORT": "port",
+    "SRC-PORT": "source_port",
+    "URL-REGEX": "domain_regex",
+    "DOMAIN-REGEX": "domain_regex",
+}
 
-def is_ipv4_or_ipv6(address):
+
+def create_session() -> requests.Session:
+    retry = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+    )
+    session = requests.Session()
+    session.headers["User-Agent"] = USER_AGENT
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    session.mount("http://", HTTPAdapter(max_retries=retry))
+    return session
+
+
+def download(url: str, timeout: float = 30) -> str:
+    with create_session() as session:
+        response = session.get(url, timeout=timeout)
+        response.raise_for_status()
+        return response.text
+
+
+def _is_network(value: str) -> bool:
     try:
-        ipaddress.IPv4Network(address)
-        return 'ipv4'
+        ipaddress.ip_network(value, strict=False)
+        return True
     except ValueError:
-        try:
-            ipaddress.IPv6Network(address)
-            return 'ipv6'
-        except ValueError:
-            return None
+        return False
 
-def parse_and_convert_to_dataframe(link):
-    rules = []
-    # 根据链接扩展名分情况处理
-    if link.endswith('.yaml') or link.endswith('.txt'):
-        try:
-            yaml_data = read_yaml_from_url(link)
-            rows = []
-            if not isinstance(yaml_data, str):
-                items = yaml_data.get('payload', [])
-            else:
-                lines = yaml_data.splitlines()
-                line_content = lines[0]
-                items = line_content.split()
-            for item in items:
-                address = item.strip("'")
-                if ',' not in item:
-                    if is_ipv4_or_ipv6(item):
-                        pattern = 'IP-CIDR'
-                    else:
-                        if address.startswith('+') or address.startswith('.'):
-                            pattern = 'DOMAIN-SUFFIX'
-                            address = address[1:]
-                            if address.startswith('.'):
-                                address = address[1:]
-                        else:
-                            pattern = 'DOMAIN'
-                else:
-                    pattern, address = item.split(',', 1)
-                if ',' in address:
-                    address = address.split(',', 1)[0]
-                rows.append({'pattern': pattern.strip(), 'address': address.strip(), 'other': None})
-            df = pd.DataFrame(rows, columns=['pattern', 'address', 'other'])
-        except:
-            df, rules = read_list_from_url(link)
-    else:
-        df, rules = read_list_from_url(link)
-    return df, rules
 
-# 对字典进行排序，含list of dict
-def sort_dict(obj):
-    if isinstance(obj, dict):
-        return {k: sort_dict(obj[k]) for k in sorted(obj)}
-    elif isinstance(obj, list) and all(isinstance(elem, dict) for elem in obj):
-        return sorted([sort_dict(x) for x in obj], key=lambda d: sorted(d.keys())[0])
-    elif isinstance(obj, list):
-        return sorted(sort_dict(x) for x in obj)
-    else:
-        return obj
+def _payload_items(text: str) -> Iterable[str]:
+    """Return rules from Clash YAML or a plain Surge/QuantumultX list."""
+    first_content_line = next(
+        (line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")),
+        "",
+    )
+    if not first_content_line.startswith("payload:"):
+        return text.splitlines()
 
-def parse_list_file(link, output_directory):
     try:
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            results= list(executor.map(parse_and_convert_to_dataframe, [link]))  # 使用executor.map并行处理链接, 得到(df, rules)元组的列表
-            dfs = [df for df, rules in results]   # 提取df的内容
-            rules_list = [rules for df, rules in results]  # 提取逻辑规则rules的内容
-            df = pd.concat(dfs, ignore_index=True)  # 拼接为一个DataFrame
-        df = df[~df['pattern'].str.contains('#')].reset_index(drop=True)  # 删除pattern中包含#号的行
-        df = df[df['pattern'].isin(MAP_DICT.keys())].reset_index(drop=True)  # 删除不在字典中的pattern
-        df = df.drop_duplicates().reset_index(drop=True)  # 删除重复行
-        df['pattern'] = df['pattern'].replace(MAP_DICT)  # 替换pattern为字典中的值
-        os.makedirs(output_directory, exist_ok=True)  # 创建自定义文件夹
+        parsed: Any = yaml.safe_load(text)
+    except yaml.YAMLError:
+        parsed = None
 
-        result_rules = {"version": 2, "rules": []}
-        domain_entries = []
-        for pattern, addresses in df.groupby('pattern')['address'].apply(list).to_dict().items():
-            if pattern == 'domain_suffix':
-                rule_entry = {pattern: [address.strip() for address in addresses]}
-                result_rules["rules"].append(rule_entry)
-                # domain_entries.extend([address.strip() for address in addresses])  # 1.9以下的版本需要额外处理 domain_suffix
-            elif pattern == 'domain':
-                domain_entries.extend([address.strip() for address in addresses])
-            else:
-                rule_entry = {pattern: [address.strip() for address in addresses]}
-                result_rules["rules"].append(rule_entry)
-        # 删除 'domain_entries' 中的重复值
-        domain_entries = list(set(domain_entries))
-        if domain_entries:
-            result_rules["rules"].insert(0, {'domain': domain_entries})
+    if isinstance(parsed, dict) and isinstance(parsed.get("payload"), list):
+        return (str(item) for item in parsed["payload"])
+    return text.splitlines()
 
-        # 处理逻辑规则
-        """
-        if rules_list[0] != "[]":
-            result_rules["rules"].extend(rules_list[0])
-        """
 
-        # 使用 output_directory 拼接完整路径
-        file_name = os.path.join(output_directory, f"{os.path.basename(link).split('.')[0]}.json")
-        with open(file_name, 'w', encoding='utf-8') as output_file:
-            result_rules_str = json.dumps(sort_dict(result_rules), ensure_ascii=False, indent=2)
-            result_rules_str = result_rules_str.replace('\\\\', '\\')
-            output_file.write(result_rules_str)
+def parse_rule(item: str) -> tuple[str, str] | None:
+    line = item.strip().strip("'\"")
+    if not line or line.startswith(("#", ";", "//")):
+        return None
 
-        srs_path = file_name.replace(".json", ".srs")
-        os.system(f"sing-box rule-set compile --output {srs_path} {file_name}")
-        return file_name
-    except Exception as e:
-        print(f'获取链接出错，已跳过：{link}，原因：{str(e)}')
-        pass
+    # Inline comments in these lists are metadata, not part of a domain.
+    line = line.split(" #", 1)[0].strip()
+    if not line or line.upper().startswith(("AND,", "OR,", "NOT,")):
+        return None
 
-# 读取 links.txt 中的每个链接并生成对应的 JSON 文件
-with open("../links.txt", 'r') as links_file:
-    links = links_file.read().splitlines()
+    if "," in line:
+        raw_type, value = line.split(",", 1)
+        raw_type = raw_type.strip().upper()
+        value = value.split(",", 1)[0].strip()
+    else:
+        value = line
+        if _is_network(value):
+            raw_type = "IP-CIDR"
+        elif value.startswith(("+.", ".", "+")):
+            raw_type = "DOMAIN-SUFFIX"
+            value = value.lstrip("+.")
+        else:
+            raw_type = "DOMAIN"
 
-links = [l for l in links if l.strip() and not l.strip().startswith("#")]
+    if raw_type == "HOST-WILDCARD":
+        # sing-box has regex matching rather than a separate wildcard field.
+        value = "^" + re.escape(value).replace(r"\*", ".*").replace(r"\?", ".") + "$"
+        mapped_type = "domain_regex"
+    else:
+        mapped_type = RULE_TYPE_MAP.get(raw_type)
+    if not mapped_type or not value:
+        return None
+    return mapped_type, value
 
-output_dir = "./"
-result_file_names = []
 
-for link in links:
-    result_file_name = parse_list_file(link, output_directory=output_dir)
-    result_file_names.append(result_file_name)
+def convert_text(text: str) -> dict[str, Any]:
+    grouped: dict[str, set[str]] = {}
+    for item in _payload_items(text):
+        parsed = parse_rule(item)
+        if parsed is None:
+            continue
+        rule_type, value = parsed
+        grouped.setdefault(rule_type, set()).add(value)
 
-# 打印生成的文件名
-# for file_name in result_file_names:
-    # print(file_name)
+    rules = [
+        {rule_type: sorted(values)}
+        for rule_type, values in sorted(grouped.items(), key=lambda pair: pair[0])
+    ]
+    return {"version": 2, "rules": rules}
+
+
+def split_rule_set(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Return domain/IP variants when a rule set contains both categories."""
+    domain_rules = [rule for rule in data["rules"] if set(rule) <= DOMAIN_RULE_TYPES]
+    ip_rules = [rule for rule in data["rules"] if set(rule) <= IP_RULE_TYPES]
+    if not domain_rules or not ip_rules:
+        return {}
+    return {
+        "domain": {"version": data["version"], "rules": domain_rules},
+        "ip": {"version": data["version"], "rules": ip_rules},
+    }
+
+
+def output_name(url: str) -> str:
+    name = Path(urlparse(url).path).name
+    if not name:
+        raise ValueError(f"URL 中没有可用的文件名: {url}")
+    return Path(name).stem
+
+
+def write_document(
+    stem: str,
+    data: dict[str, Any],
+    output_dir: Path,
+    sing_box: str,
+    compile_srs: bool,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    json_path = output_dir / f"{stem}.json"
+    json_tmp = output_dir / f".{stem}.json.tmp"
+    srs_path = output_dir / f"{stem}.srs"
+    srs_tmp = output_dir / f".{stem}.srs.tmp"
+
+    json_tmp.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    try:
+        if compile_srs:
+            subprocess.run(
+                [sing_box, "rule-set", "compile", "--output", str(srs_tmp), str(json_tmp)],
+                check=True,
+            )
+            srs_tmp.replace(srs_path)
+        json_tmp.replace(json_path)
+    finally:
+        json_tmp.unlink(missing_ok=True)
+        srs_tmp.unlink(missing_ok=True)
+    return json_path
+
+
+def write_rule_set(
+    url: str,
+    text: str,
+    output_dir: Path,
+    sing_box: str,
+    compile_srs: bool,
+) -> list[Path]:
+    stem = output_name(url)
+    data = convert_text(text)
+    documents = {stem: data}
+    documents.update(
+        {f"{stem}_{kind}": subset for kind, subset in split_rule_set(data).items()}
+    )
+    return [
+        write_document(name, document, output_dir, sing_box, compile_srs)
+        for name, document in documents.items()
+    ]
+
+
+def read_links(path: Path) -> list[str]:
+    links = [
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    duplicates = sorted(link for link, count in Counter(links).items() if count > 1)
+    if duplicates:
+        raise ValueError(f"links 文件包含重复 URL: {', '.join(duplicates)}")
+    stems = [output_name(link) for link in links]
+    collisions = sorted(stem for stem, count in Counter(stems).items() if count > 1)
+    if collisions:
+        raise ValueError(f"多个 URL 会覆盖同名输出: {', '.join(collisions)}")
+    return links
+
+
+def run(args: argparse.Namespace) -> int:
+    links = read_links(args.links)
+    failures: list[tuple[str, Exception]] = []
+    downloaded: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+        futures = {executor.submit(download, link, args.timeout): link for link in links}
+        for future in as_completed(futures):
+            link = futures[future]
+            try:
+                downloaded[link] = future.result()
+            except Exception as exc:  # Report all failed sources together.
+                failures.append((link, exc))
+
+    if failures:
+        for link, exc in failures:
+            print(f"下载失败: {link}: {exc}", file=sys.stderr)
+        return 1
+
+    for link in links:
+        paths = write_rule_set(
+            link, downloaded[link], args.output, args.sing_box, not args.no_compile
+        )
+        for path in paths:
+            print(f"已生成 {path.relative_to(ROOT) if path.is_relative_to(ROOT) else path}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--links", type=Path, default=DEFAULT_LINKS_FILE)
+    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--sing-box", default="sing-box")
+    parser.add_argument("--no-compile", action="store_true", help="只生成 JSON")
+    parser.add_argument("--jobs", type=int, default=6, help="并行下载数")
+    parser.add_argument("--timeout", type=float, default=30, help="单次请求超时（秒）")
+    return parser
+
+
+if __name__ == "__main__":
+    raise SystemExit(run(build_parser().parse_args()))
