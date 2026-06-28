@@ -148,15 +148,15 @@ def convert_text(text: str) -> dict[str, Any]:
 
 
 def split_rule_set(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Return domain/IP variants when a rule set contains both categories."""
+    """Return independent domain/IP rule sets; omit all other match types."""
     domain_rules = [rule for rule in data["rules"] if set(rule) <= DOMAIN_RULE_TYPES]
     ip_rules = [rule for rule in data["rules"] if set(rule) <= IP_RULE_TYPES]
-    if not domain_rules or not ip_rules:
-        return {}
-    return {
-        "domain": {"version": data["version"], "rules": domain_rules},
-        "ip": {"version": data["version"], "rules": ip_rules},
-    }
+    result = {}
+    if domain_rules:
+        result["domain"] = {"version": data["version"], "rules": domain_rules}
+    if ip_rules:
+        result["ip"] = {"version": data["version"], "rules": ip_rules}
+    return result
 
 
 def output_name(url: str) -> str:
@@ -205,14 +205,25 @@ def write_rule_set(
 ) -> list[Path]:
     stem = output_name(url)
     data = convert_text(text)
-    documents = {stem: data}
-    documents.update(
-        {f"{stem}_{kind}": subset for kind, subset in split_rule_set(data).items()}
-    )
-    return [
+    subsets = split_rule_set(data)
+    if not subsets:
+        raise ValueError(f"来源不包含可输出的域名或 IP 规则: {url}")
+    documents = {f"{stem}_{kind}": subset for kind, subset in subsets.items()}
+    paths = [
         write_document(name, document, output_dir, sing_box, compile_srs)
         for name, document in documents.items()
     ]
+    # These names are fully managed by this source. Remove legacy combined files
+    # and stale category files only after all new outputs were written successfully.
+    obsolete = {output_dir / f"{stem}{suffix}" for suffix in (".json", ".srs")}
+    for kind in ("domain", "ip"):
+        if kind not in subsets:
+            obsolete.update(
+                output_dir / f"{stem}_{kind}{suffix}" for suffix in (".json", ".srs")
+            )
+    for path in obsolete:
+        path.unlink(missing_ok=True)
+    return paths
 
 
 def read_links(path: Path) -> list[str]:

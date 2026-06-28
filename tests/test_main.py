@@ -76,8 +76,15 @@ class ConversionTests(unittest.TestCase):
             },
         )
 
-    def test_single_category_rule_set_is_not_split(self):
+    def test_single_category_rule_set_gets_semantic_name(self):
         data = {"version": 2, "rules": [{"domain": ["example.cn"]}]}
+        self.assertEqual(
+            split_rule_set(data),
+            {"domain": {"version": 2, "rules": [{"domain": ["example.cn"]}]},},
+        )
+
+    def test_process_rules_are_excluded_from_category_outputs(self):
+        data = {"version": 2, "rules": [{"process_name": ["example"]}]}
         self.assertEqual(split_rule_set(data), {})
 
 

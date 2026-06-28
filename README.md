@@ -9,7 +9,7 @@
   "tag": "geosite-wechat",
   "type": "remote",
   "format": "binary",
-  "url": "https://raw.githubusercontent.com/akaagiao1/sing-box-geosite/main/rule/WeChat.srs",
+  "url": "https://raw.githubusercontent.com/akaagiao1/sing-box-geosite/main/rule/WeChat_domain.srs",
   "download_detour": "auto"
 }
 ```
@@ -26,12 +26,12 @@
 
 输出文件名取自 URL 的文件名。同名来源会导致校验失败，以避免规则被静默覆盖。
 
-当一个来源同时包含域名和 IP CIDR 时，会保留原始合并文件，并额外生成：
+每个来源按匹配目标独立生成：
 
 - `<名称>_domain.json/.srs`：仅包含域名匹配规则，适合 DNS 和域名路由
-- `<名称>_ip.json/.srs`：仅包含目标/源 IP CIDR，适合 IP 路由
+- `<名称>_ip.json/.srs`：仅包含目标/源 IP CIDR，适合 IP 路由；没有 CIDR 时不生成
 
-保留合并文件是为了兼容已有配置。新配置建议分别引用 domain 和 IP 文件。
+不再生成无后缀的混合文件。`process_name` 等非域名/IP条件不会混入分类文件，避免在 DNS 或路由引用时扩大匹配范围。
 
 Fork 后需要在 `Settings → Actions → General → Workflow permissions` 中启用 **Read and write permissions**，自动更新才能推送生成文件。
 
