@@ -1,19 +1,12 @@
 {
-  "version": 1,
+  "version": 5,
   "rules": [
     {
       "domain": [
-        "cherrytv.one"
-      ]
-    },
-    {
-      "domain_suffix": [
-        ".cherrytv.one"
-      ]
-    },
-    {
-      "domain_keyword": [
-        "cherrytv"
+        "aaa.yusen6.ccwu.cc",
+        "emby.yusen.us.ci",
+        "embya.yusen.cyou",
+        "emby.yusen.cc.cd"
       ]
     }
   ]
